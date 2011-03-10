@@ -1,0 +1,1 @@
+auROra is an collection of tools that help integrate different methods of working remotely from one machine to the other.  Emacs daemon, screen, ssh, and X are all great, but using them together is sometimes less flexible than it should be.
