@@ -232,7 +232,7 @@ export -f _ro_send_server_data
 ro_screen() {
     # Are we gonna have to parse screen command input?
     # doesn't seem so.
-    send-server-data "$@"
+    _ro_send_server_data "$@"
     screen "$@"
 }
 export -f ro_screen
