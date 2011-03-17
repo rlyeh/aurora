@@ -1,1 +1,117 @@
-auROra is an collection of tools that help integrate different methods of working remotely from one machine to the other.  Emacs daemon, screen, ssh, and X are all great, but using them together is sometimes less flexible than it should be.
+Aurora: "A utility:  remote operations,  remote access"
+         Really though, I named it after my dog Aurora 
+         (who we call "Ro" for short).
+         Author: rlyeh@reillyhayes.com
+
+
+* Description and Goals:
+
+Integrate local and remote use of Emacs, X, ssh, and GNU Screen. "Local" means
+the keyboard is touching your fingers and that your eyes are looking
+at the monitor.  Remote means any other posixy machine you can reach via ssh.
+
+** Emacs Server Forwarding 
+
+If you're logged into a remote machine, you can enter a command on the
+remote machine to open a buffer on your local emacs server (using
+emacsclient over a port forwarded via a persistent/recoverable ssh tunnel). 
+
+** Remote/Local GNU Screen Integration
+
+TBD:  Find and attach to both local and remote Screen sessions.
+
+** Philosophy
+
+Aurora attempts to make most of the mechanism as invisible as possible.  
+The working assumption is that the local machine is likely to be a laptop
+that moves around, changes addresses, changes quality of connection, 
+alternates being inside/outside the corp firewall, uses VPNs or not. 
+Invisible means that the user should not need to adjust settings or
+parameters in the face of this kind of transition.
+
+Recovery of the tunnel should be automatic.  Extended loss of connectivity
+should not be problematic and should not churn your CPU.  Leave the tunnel
+active for days and it should seamlessly reconnect as you go to and from 
+work, suspend your laptop, etc.
+
+SSHing into a remote host over an unreliable link frequently means using GNU
+Screen.  Aurora can automatically adjust settiings in sessions controlled
+by screen when re-attaching to that screen from a different IP address or 
+from a different host (perhaps you are re-attaching to a screen session
+that you started on a desktop you are now accessing remotely from your 
+laptop).
+
+In high bandwidth situations, your "local" emacs daemon of choice may be 
+running on the remote host and displaying locally X-Windows. 
+the connection degrades, you may want to switch to an emacs daemon running
+on your local machine.  This should be easy and not a disaster.  Aurora 
+specifically tries to prevent having the same file open in both a local 
+and remote emacs daemon.
+
+You should never have to worry about EMACS_SERVER_FILE or what it points to.
+Likewise with your DISPLAY variable. 
+
+
+** Assumptions & Requirements:
+
+1)  The files you wish to deal with are primarily on the remote host.  This 
+is a security requirement where I work, but I've come to appreciate it.  If 
+you're building and compiling locally as well as remotely, a distributed 
+version control system like Git probably makes more sense than Aurora.
+
+2) Emacs is run exclusively as a daemon.  It's always ready to talk to 
+emacsclient and you shut it down much less often than you change your 
+underwear. (note: Emacs doesn't run quite right in daemon mode on OS X, 
+but I have some elisp elsewhere that approximates it.)
+
+3) I'm running a trunk build of Emacs 24.  I don't know what breaks in 
+Emacs 23 and I don't much care.  I've had virtually no trouble with 
+24 on either Linux or OS X.
+
+4) Emacs Server must run in TCP mode listening on 127.0.0.1.  I need to 
+look into using socat to "republish" a named pipe.
+
+5) The structure of your emacs and personal bin configuration is
+   the same everywhere (from ~/ down).
+
+6) I've only made this work on Linux (Ubuntu) and OS X.  There
+is some insufficiently parameterized use of Unix commands that
+vary widely in their implementation.
+
+7) I (stupidly) assume that your .emacs is shared across different machines
+but that you use different customization files.  I do this, but you
+probably don't.  Some of the host dependent customization should be done
+with an alist keyed by system-type.
+
+8) I use SIGINFO on OS X and SIGUSR2 on Linux to tell shells to reload 
+EMACS_SERVER_FILE and DISPLAY from my file.  Aurora only sends to interactive
+shells that have registered to receive traps.  Nonetheless, signals are 
+potentially perilous.
+
+9) Not yet ready for IPV6. I feel guilty about this.  Sorry Margaret!!
+
+
+** Things to do:
+
+1) Aurora should record the creation of both local and remote
+GNU Screen sessions and windows (and propogate this information
+to the other side of the tunnel.)
+
+2) Aurora should display a Screen Session list in Emacs with a 
+summary of each session's windows.  Clicking on a session should 
+open an XTerm or Terminal that reattaches to that session.  Note that 
+Screen is hideous when contained by Emacs shell mode.  Optionally 
+leave session attached remotely.
+
+3) Display list of buffers open in remote emacs daemon.  Migrate selected
+buffer to local emacs daemon (with pending changes).
+
+4) Intelligently use file shares when local and remote have sufficent 
+"proximity" (Same wired subnet?) 
+
+
+** Notes:
+        
+Commands & functions start with "ro_" or "_ro_" (for utility functions)
+
+
