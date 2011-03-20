@@ -123,12 +123,17 @@
        (eq server-use-tcp 't)
        (string= server-host "127.0.0.1")))
 
-(defun ro-start-default-tunnel ()
-  "Start tunnel to default host"
+(defun ro-stop-tunnel (hostname)
+  "Stop tunnel"
+  (interactive)
+  (kill-process (ro-proc-name hostname)))
+
+(defun ro-stop-default-tunnel ()
+  "stop tunnel to default host"
   (interactive)
   (when (stringp ro-default-host)
-    (ro-start-tunnel ro-default-host)))
-
+    (ro-stop-tunnel ro-default-host)))
+  
 (defun ro-ssh-forward-spec (port-number)
   "Return a forward specification for the provided port-number"
   (let ((port-string (number-to-string port-number)))
@@ -166,6 +171,12 @@
                   (ro-error "Could not share server credentials")
                   (delete-process newproc)))))))
 
+(defun ro-start-default-tunnel ()
+  "Start tunnel to default host"
+  (interactive)
+  (when (stringp ro-default-host)
+    (ro-start-tunnel ro-default-host)))
+
 (defun ro-server-active-p ()
   "Test that the server process is still healthy"
   (string= (process-status server-name) "listen"))
@@ -176,9 +187,10 @@
 	 (forward-spec (ro-ssh-forward-spec port))
 	 (proc (let ((process-connection-type nil))
 		 (start-process 
-		  proc-name proc-name "/usr/bin/ssh" "-N" "-R" 
+		  proc-name proc-name "/usr/bin/ssh" "-R" 
 		  forward-spec "-o" "ExitOnForwardFailure=yes"
-		  "-o" "TcpKeepAlive=yes" hostname ))))
+		  "-o" "TcpKeepAlive=yes" hostname "aurora-catch-tunnel.sh" 
+                  ro-server-hostname system-name (format "%d" port)))))
                   ;;ro-delete-script credfile
     (cond (proc 
            (ro-set-host-ip hostname)
@@ -199,10 +211,6 @@
     (set-process-sentinel proc 'nil)
     (delete-process proc)))
 
-(defun ro-safe-file-list (file-list)
-  (format "%S" (map 'list ro-safe-file file-list)))
-
-
 (defun ro-safe-file (file)
   "Close any unmodified buffer for file. Return unsafe for modified buffer."
   (let ((buffer (get-file-buffer (file-truename file))))
@@ -213,6 +221,9 @@
            (format "safe:%s" file))
           (t 
            (format "unsafe:%s" file))))) 
+
+(defun ro-safe-file-list (file-list)
+  (format "%S" (map 'list 'ro-safe-file file-list)))
 
 (defun ro-get-host-ip (hostname)
   "Read the buffer-local variable for the host ip from the process buffer "

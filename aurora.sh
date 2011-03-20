@@ -28,7 +28,15 @@ ro_env() {
   split_to_vars - - srcpath "$(caller)"
   
   : ${EMACS_SERVER_LOCAL_NAME:=server}
-    # Extract components from EMACS_SERVER_FILE if available
+  if [[ "$OSNAME" == "Darwin" ]] ; then 
+  : ${RO_SIG:=SIGINFO}
+  elif [[ "$OSNAME" == "Linux" ]] ; then 
+  : ${RO_SIG:=SIGUSR2}
+  else
+  : ${RO_SIG:=SIGTERM}
+  fi
+  # Extract components from EMACS_SERVER_FILE if available
+  # Do not override EMACS_SERVER_FILE if it has been set 
   if [[ -n "$EMACS_SERVER_FILE" ]] ; then 
     export EMACS_SERVER_NAME=$(basename "$EMACS_SERVER_FILE")
     if [[ "${EMACS_SERVER_FILE}" == "${EMACS_SERVER_NAME}" ]] ; then
@@ -48,11 +56,15 @@ ro_env() {
     fi
   fi
     
-    # A reasonable default
+  # A reasonable default
   : ${EMACS_SERVER_AUTH_DIR:=~/.emacs.d/server}
-  : ${EMACS_SERVER_NAME:=${EMACS_SERVER_LOCAL_NAME}}
   : ${EMACSCLIENT:=$(which emacsclient)}
-  : ${RO_TMPDIR:=/tmp}
+  : ${RO_TMPDIR:=/tmp/aurora}
+  if [[ ! -d "${RO_TMPDIR}" ]] ; then 
+    mkdir -p -m 700 ${RO_TMPDIR}
+  else
+    chmod 700 ${RO_TMPDIR}
+  fi
   export RO_TMPDIR
   export EMACS_SERVER_AUTH_DIR EMACS_SERVER_FILE EMACS_SERVER_NAME 
   export EMACS_SERVER_LOCAL_NAME EMACSCLIENT
@@ -61,13 +73,14 @@ export -f ro_env
 
 ro_init() {
   # ro_init must be called once per bash invocation
+  
   ro_env
 
   [[ -z "$EMACS_SERVER_FILE" ]] && ro_use 
 
   if [[ -n "$STY" ]] && [[ -n "$PS1" ]]; then 
     echo $$ >>${RO_TMPDIR}/${STY}-bashpids
-    trap _ro_reset_server_display INFO
+    trap _ro_reset_server_display ${RO_SIG}
   fi
 }
 export -f ro_init
@@ -99,6 +112,21 @@ _ro_reset_server_display() {
   fi
 }
 export -f _ro_reset_server_display
+
+_ro_catch_tunnel() {
+  local \
+      servername=$1 \
+      serverhost=$2 \
+      serverport=$3 \
+      fromip=${SSH_CONNECTION%% *}
+
+  echo >${RO_TMPDIR}/${fromip}.tunnel "$servername,$serverhost,$serverport,$SSH_CONNECTION"
+  while true; do
+    read aline
+  done
+}
+export -f _ro_catch_tunnel
+
 
 split_to_vars() {
   # Split the string provided as the final argument into tokens/words per IFS.
@@ -134,8 +162,6 @@ split_to_vars() {
   # split a __ b \: "one two three four"
   # Assigns "one" to $a, "two:three:four" to $b
   #
-
-
   
   local \
       evalstr \
@@ -204,12 +230,14 @@ _ro_send_server_data() {
     # without additional helper scripts, etc.  I'm still not happy with this
     # I can get rid of the POST_FILE by writing the emacserver and display
     # files in a temporary screen.  Not sure this is best.
-    screen "$@" -X eval \
+    if ! screen "$@" -X eval \
         "setenv DISPLAY $DISPLAY" \
         "setenv EMACS_SERVER_FILE $EMACS_SERVER_FILE" \
         "setenv POST_FILE $post_file" \
-        "screen bash -c 'echo \$STY >\${POST_FILE}'"
-    
+        "screen bash -c 'echo \$STY >\${POST_FILE}'"; then
+      return
+    fi
+      
     # let's check for a race condition, just in case
     until [[ -r "${post_file}" ]] ; do
         sleep 1
@@ -223,7 +251,7 @@ _ro_send_server_data() {
     # interactive shells that see the STY variable register themselves
     for shell_pid in $(cat ${RO_TMPDIR}/${target_sty}-bashpids) ; do
         # Tell them to read the files
-        kill -INFO $shell_pid 2>/dev/null
+        kill -s ${RO_SIG} $shell_pid 2>/dev/null
     done
     echo $target_sty
 }
@@ -232,8 +260,10 @@ export -f _ro_send_server_data
 ro_screen() {
     # Are we gonna have to parse screen command input?
     # doesn't seem so.
-    _ro_send_server_data "$@"
-    screen "$@"
+  echo "Sharing Data"
+  _ro_send_server_data "$@"
+  echo Starting Screen
+  screen "$@"
 }
 export -f ro_screen
   
@@ -244,61 +274,149 @@ ro_ssh() {
 }
 export -f ro_ssh
 
-_ro_discover_controlling_display () {
-  # Try to discover information about the controlling display without relying
-  # on DISPLAY or EMACS_SERVER_FILE.  Primarily uses "who -m", which is fairly
-  # useless on Darwin (OS X)
-    local \
-        whostring \
-        scratch \
-        controlling \
-        screen_num \
-        display \
-        host \
-        tty \
-
-    whostring="$(who -m)" 
-    scratch="${whostring#*\(}"
-    controlling="${scratch%\)*}"
-    split_to_vars user tty "$whostring" 
-    
-    if [[ $(uname -s) == "Linux" ]]; then 
-        scratch=${controlling##*\:S\.}
-        if [[ "${scratch}" != "{$controlling}" ]] ; then 
-            controlling=${controlling%\:S\.*}
-            screen_num="$scratch"
-        else
-            screen_num=""
-        fi
-        
-        scratch=${controlling##*\:}
-        if [[ "${scratch}" != "{$controlling}" ]] ; then 
-            display=${controlling}
-            controlling=${controlling%\:*}
-        else
-            display=""
-        fi
-        if [[ -n "$controlling}" ]]; then
-            host="${controlling}"
-        else
-            host=$(uname -n)
-        fi
-        _ro_names_for_ip $host 
+_ro_controlling_display () {
+  # Try to discover information about the controlling display
+  local \
+      regex_screen='S\.([[:digit:]]+)(\.[[:digit:]]+)?' \
+      regex_display='((.*):)?(([[:digit:]]+)(\.[[:digit:]]+)?)' \
+      regex_localhost='(localhost)|(127.0.0.1)|(\:\:1)' \
+      regex_control='(\()([[:alnum:]:\.]+)(\))' \
+      regex_ipv6loopback='^(\:\:1)(.*)' \
+      regex_path='/(.+)' \
+      regex_ipv4='[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+' \
+      whostring \
+      controlling \
+      screen_num \
+      display \
+      display_num \
+      display_host \
+      display_ip \
+      ip \
+      tty \
+      sparray
+  
+  # who provides good information
+  whostring="$(who -m)" 
+  IFS=" " split_to_vars user tty "$whostring"
+  [[ -n "$tty" ]] && tty="/dev/$tty"
+  
+  if [[ "$whostring" =~ $regex_control ]] ; then
+    controlling="${BASH_REMATCH[2]}"
+        #  Check for ipv6 loopback
+    if [[ "$controlling" =~ $regex_ipv6loopback  ]];  then 
+      ip="127.0.0.1"
+          # The colons in IPV6 trash parsing who output
+      controlling="${BASH_REMATCH[2]}"
     fi
-    echo "$host,$tty,$display,$screen_num"
+    IFS=":" sparray=($controlling) 
+    for (( ind=${#sparray[@]}-1 ; ind >= 0 ; ind-- )) ; do 
+      token="${sparray[$ind]}"
+      if [[ "${token}" =~ ^$regex_screen$ ]] ; then
+        screen_num="${BASH_REMATCH[1]}"
+        continue ; 
+      elif [[ "${token}" =~ ^$regex_display$ ]] ; then
+            # We only want the first part of display.  Mostly to 
+            # see if X might be forwarded.
+        display_num="${BASH_REMATCH[4]}"
+        display="${BASH_REMATCH[3]}"
+      elif [[ "${token}" =~ ^$regex_localhost$ ]]; then 
+        ip="127.0.0.1"
+      elif [[ "${token}" =~ ^$regex_ipv4$ ]] ; then
+        ip=${token}
+      fi
+    done
+  elif [[ -z "$STY" ]] ; then 
+    if [[  "$DISPLAY" =~ ^$regex_display$ ]] ; then
+      display=${BASH_REMATCH[0]}
+      display_host=${BASH_REMATCH[2]}
+      display_num=${BASH_REMATCH[3]}
+      if [[ "$display_host" =~ ^$regex_localhost$ ]] ||
+        [[ "$dispay_host" =~ ^$regex_path$ ]] ; then
+        xaddr="127.0.0.1"
+      elif [[ "$display_host" =~ ^$regex_ipv4$ ]] ; then 
+        xaddr=$display_host
+      elif ! xaddr=$(dig +short +search $display_host); then
+        unset xaddr
+      fi
+      if [[ -n "$SSH_CONNECTION" ]] ; then
+        ip=${SSH_CONNECTION%% *}
+        if [[ "ip" =~ ^$regex_localhost$ ]] ; then
+          ip="127.0.0.1"
+        elif [[ ! "$ip" =~ ^$regex_ipv4$ ]] ; then 
+          ip=$(dig +short +search $ip) || unset ip 
+        fi
+      fi
+    else
+      return 1
+      # We're in screen and who is telling us shit
+    fi
+  fi
+  echo "$ip,$tty,$screen_num,$display,$display_ip,$display_num"
 }
-export -f _ro_discover_controlling_display
+export -f _ro_controlling_display
+
+turn_to_regex() {
+  local \
+      regex \
+      dn 
+  local -i \
+      ind \
+      tokens
+
+  IFS="." dn=($1)
+  tokens=${#dn[@]}
+
+  for (( ind=$tokens ; ind > 1 ; ind-- )) ; do 
+    regex="(\.${dn[$ind]}${regex})?"
+  done
+  regex="${dn[0]}${regex}"
+  echo "$regex"
+}
 
 _ro_server_file_name() {
     # return a full path to server file given a partial (name only) or 
     # pull path name
-    if [[ $(basename "$1") == "$1" ]] ; then 
-        echo "${EMACS_SERVER_AUTH_DIR}/${1}"
-    else
-        echo "$1"
-    fi
+  if [[ $(basename "$1") == "$1" ]] ; then 
+    echo "${EMACS_SERVER_AUTH_DIR}/${1}"
+  else
+    echo "$1"
+  fi
 }
 export -f _ro_server_file_name
+
+
+_ro_myips() {
+  # What are my IPs.
+  local \
+      regex='(inet (addr:)?)([[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+)' \
+      aline 
+  local -a \
+      result
+  ifconfig -a | egrep -e "$regex" | while read aline ; do 
+    if [[ "$aline" =~ $regex ]]; then 
+      if [[ ${BASH_REMATCH[3]} != "127.0.0.1" ]] ; then 
+        echo ${BASH_REMATCH[0]}
+        result+=(${BASH_REMATCH[3]})
+      fi
+    fi
+  done
+  echo "${result[*]}"
+}
+
+_ro_myip_regex() {
+  local \
+      result
+  for ipaddr in $(_ro_myips) ; do
+    [[ -n "$result" ]] && result+="|"
+    result+="(${ipaddr//\./\\\.})"
+  done
+  [[ -z "result" ]] && result="a^"
+  echo "$result"
+}
+
+
+ipaddr=${BASH_REMATCH[3]}
+
 
 _ro_check_for_active_server() {
     local \
@@ -318,7 +436,8 @@ _ro_check_for_active_server() {
             ip=$(dig +search +short $host | tail -1)
         fi
         
-        if netstat -l -t -n | fgrep -q $ip:$port ; then 
+        if netstat -l -t -n | fgrep -q $ip:$port ; then
+            echo $server_file
             return 0
         else
         # Nobody is listening.  OR the emacs server is actually remote and
@@ -345,28 +464,28 @@ export -f ro_cleanup_tunnels
 
 _ro_ipv4_p () {
     local \
-        ipv4regex='^[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+$'
-    [[ "$1" =~ $ipv4regex ]]
+        regex_ipv4='^[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+$'
+    [[ "$1" =~ $regex_ipv4 ]]
 }
 export -f _ro_ipv4_p
 
 _ro_bonjour_p () {
     local \
-        mdnsregex='^([[:alnum:]\_\-]+)\.local[.]?$'
-    [[ "$1" =~ $mdnsregex ]]
+        regex_mdns='^([[:alnum:]\_\-]+)\.local[.]?$'
+    [[ "$1" =~ $regex_mdns ]]
 }
 export -f _ro_bonjour_p
 
 _ro_dns_p () {
     local \
-        dnsregex='^([[:alnum:]\_\-]+\.)+[[:alnum:]\_\-]+[.]?$'
-    [[ "$1" =~ $dnsregex ]] && ! _ro_bonjour_p "$1" && ! _ro_ipv4_p "$1"
+        regex_dns='^([[:alnum:]\_\-]+\.)+[[:alnum:]\_\-]+[.]?$'
+    [[ "$1" =~ $regex_dns ]] && ! _ro_bonjour_p "$1" && ! _ro_ipv4_p "$1"
 }
 export -f _ro_dns_p
 
-_ro_host_p () {
+_ro_simplehost_p () {
     local \
-        hostregex='^[[:alnum:]\_\-]+$'
+        regex_simplehost='^[[:alnum:]\_\-]+$'
     [[ "$1" =~ $hostregex ]]
 }
 export -f _ro_host_p
@@ -377,9 +496,6 @@ export -f _ro_host_p
 _ro_node_self_p() {
     local host=$1
     
-    if _ro_host_p "$host" ; then
-        :
-    fi
     if _ro_ipv4_p $host; then
         if [[ "$host" == "127.0.0.1" ]] ; then
             return 0
@@ -394,34 +510,6 @@ _ro_node_self_p() {
     fi
 }
 export -f _ro_node_self_p
-
-
-_ro_server_names_for_host () {
-    local \
-        host="$1"
-
-    # Check for a bunch of variations on THIS HOST
-        
-    if [[ "$servername" == "127.0.0.1" ]] || 
-       [[ "$servername" == "$SHORTHOST" ]] ||
-       [[ "$servername" == "$HOSTNAME" ]] ; then 
-        
-      echo ${EMACS_SERVER_LOCAL_NAME}
-      return 0
-    fi
-    if [[ -d "$EMACS_SERVER_AUTH_DIR/ipmap" ]] ; then
-        for file in $EMACS_SERVER_AUTH_DIR/ipmap/* ; do
-            if fgrep -q $1 $file ; then
-                servername=${file%%*/}
-                if _ro_check_for_active_server $servername; then 
-                    aresult+=($servername)
-                fi
-            fi
-        done
-    fi
-    echo ${aresult[@]}
-}
-export -f _ro_server_names_for_host
 
 ro_describe_emacs() {
   local \
@@ -443,32 +531,89 @@ ro_describe_emacs() {
     fi
   fi
 }
+
+_ro_server_name_for_ip() {
+  local \
+      ip=$1 \
+      split_to_vars servername serverhost serverport \
+      from_ip from_port to_ip to_port \
+      fname=${RO_TMPDIR}/${1}.tunnel
+  if [[ -r "$fname" ]]; then 
+    IFS=", " split_to_vars servername serverhost serverport \
+        from_ip from_port to_ip to_port \
+        "$(cat ${fname})"
+    echo $servername
+  else
+    return 1
+  fi
+}
         
 ro_use() {
-    local \
-        controlling_ip \
-        remote_hosts
-    declare -a remote_hosts 
-    if [[ -n "$1" ]]; then
-        remote_hosts=($1)
-    elif [[ -n "$STY" ]] || [[ -n "$STY" ]] ; then
-        remote_hosts=($_ro_controlling_host)
-    elif [[ -n "$SHH_CONNECTION" ]] ; then 
-        remote_hosts=($_ro_names_for_ip ${SSH_CONNECTION%% *})
-    else
-        export EMACS_SERVER_FILE=$EMACS_SERVER_AUTH_DIR/$EMACS_SERVER_LOCAL_NAME
-        echo Using local Emacs server
-        return 0
-    fi
+  local \
+      controlling_ip \
+      remote_server \
+      c_ip c_tty c_screen_num c_display c_display_ip c_display_num
 
-    if (( ${#remote_hosts[@]} == 1)) ; then
-        echo Using Emacs server at ${remote_hosts[1]}
-        export EMACS_SERVER_FILE=$EMACS_SERVER_AUTH_DIR/${remote_hosts[1]}
-    elif (( ${#remote_hosts[@]} > 1)) ; then
-        echo Multiple possible Emacs servers.
-        echo ${remote_hosts[@]}
-        return 1
+     
+    
+  if [[ -n "$1" ]]; then
+    if server_file=(_ro_check_for_active_server $1) ; then
+      export EMACS_SERVER_FILE=$server_file
+      export EMACS_SERVER_NAME=$(basename $server_file)
+      return 0
+    else
+      echo "Specified Emacs Server $1 is not active or reachable"
+      return 1
     fi
+  elif [[ -n "$STY" ]] ; then
+      # This is the hard case, since the environment variables may not be reliable any more.
+      # also, we need to know if already have good values.  Need to consider that
+    IFS="," split_to_vars c_ip c_tty c_screen_num c_display c_display_ip c_display_num \
+        "$(_ro_controlling_display)"
+    if [[ "$c_ip" == "" ]] || [[ "$c_ip" = "127.0.0.1" ]]; then
+      if [[ $c_display_num -eq 0 ]] || [[ -z "$c_display_num" ]] ; then
+        export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+        export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      else
+        echo "Potentially confused by tunneled X - $c_display"
+        export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+        export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      fi
+    elif server=$(_ro_server_name_for_ip $c_ip) ; then 
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${server}
+      export EMACS_SERVER_NAME=$server
+    elif _ro_node_self_p $c_ip ; then 
+      echo Connection to own IP
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+    else
+      echo No known server for ">$c_ip<"
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+    fi
+  elif [[ -n "$SSH_CONNECTION" ]] ; then 
+      # trace back to server
+    if server=($(_ro_server_name_for_ip ${SSH_CONNECTION%% *})); then 
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${server}
+      export EMACS_SERVER_NAME=$server
+    elif _ro_node_self_p ${SSH_CONNECTION%% *} ; then 
+      echo Connection to own IP
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+    else
+      echo No known server for ${SSH_CONNECTION%% *}
+      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+    fi
+  else
+    export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
+    export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+  fi
+  if [[ "$EMACS_SERVER_NAME" == "$EMACS_SERVER_LOCAL_NAME" ]] ; then 
+    echo "Using local Emacs server"
+  else
+    echo "Using Emacs server: $EMACS_SERVER_NAME"
+  fi
 }
 export -f ro_use
 
