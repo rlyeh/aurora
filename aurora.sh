@@ -488,7 +488,7 @@ _ro_simplehost_p () {
         regex_simplehost='^[[:alnum:]\_\-]+$'
     [[ "$1" =~ $hostregex ]]
 }
-export -f _ro_host_p
+export -f _ro_simplehost_p
 
 # Darwin: scutil -r name | fgrep -q -e "Local Address"
 # will return true if the name is this machine
