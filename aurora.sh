@@ -120,7 +120,8 @@ _ro_catch_tunnel() {
       serverport=$3 \
       fromip=${SSH_CONNECTION%% *}
 
-  echo >${RO_TMPDIR}/${fromip}.tunnel "$servername,$serverhost,$serverport,$SSH_CONNECTION"
+  echo >${RO_TMPDIR}/${fromip}.tunnel \
+      "$servername,$serverhost,$serverport,$SSH_CONNECTION"
   while true; do
     read aline
   done
@@ -207,7 +208,8 @@ split_to_vars() {
       # Unset var in case we don't set it (string may not have enough tokens)
       unset $1
       # Be sure the assignment is to an actual value
-      [[ $ind -ge 0 ]] && [[ $ind -lt $itemcount ]] && evalstr+="$1=\"\${parray[$ind]}\" "
+      [[ $ind -ge 0 ]] && [[ $ind -lt $itemcount ]] && \
+          evalstr+="$1=\"\${parray[$ind]}\" "
     fi
     shift ; ind+=1
   done
@@ -387,20 +389,21 @@ export -f _ro_server_file_name
 
 _ro_myips() {
   # What are my IPs.
-  local \
-      regex='(inet (addr:)?)([[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+)' \
-      aline 
+#  local \
+      regex_ipv4='([[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+\.[[:digit:]]+)' \
+      regex="(inet (addr:)?)${regex_ipv4}" \
+      aline="" \
+      token=""
   local -a \
-      result
-  ifconfig -a | egrep -e "$regex" | while read aline ; do 
-    if [[ "$aline" =~ $regex ]]; then 
-      if [[ ${BASH_REMATCH[3]} != "127.0.0.1" ]] ; then 
-        echo ${BASH_REMATCH[0]}
-        result+=(${BASH_REMATCH[3]})
+      aresult
+    ifconfig -a | egrep -e "$regex" | while read aline ; do 
+    if [[ "$aline" =~ $regex ]]; then
+      token="${BASH_REMATCH[3]}"
+      if [[  "${token}" != "127.0.0.1" ]] ; then
+        echo -n "$token "
       fi
     fi
-  done
-  echo "${result[*]}"
+  done 
 }
 
 _ro_myip_regex() {
@@ -550,69 +553,68 @@ _ro_server_name_for_ip() {
         
 ro_use() {
   local \
-      controlling_ip \
-      remote_server \
+      server \
       c_ip c_tty c_screen_num c_display c_display_ip c_display_num
-
-     
     
   if [[ -n "$1" ]]; then
-    if server_file=(_ro_check_for_active_server $1) ; then
-      export EMACS_SERVER_FILE=$server_file
-      export EMACS_SERVER_NAME=$(basename $server_file)
+    if server=(_ro_check_for_active_server $1) ; then
+      export EMACS_SERVER_FILE=$server
+      export EMACS_SERVER_NAME=$(basename $server)
       return 0
     else
       echo "Specified Emacs Server $1 is not active or reachable"
       return 1
     fi
   elif [[ -n "$STY" ]] ; then
-      # This is the hard case, since the environment variables may not be reliable any more.
-      # also, we need to know if already have good values.  Need to consider that
-    IFS="," split_to_vars c_ip c_tty c_screen_num c_display c_display_ip c_display_num \
+      # This is the hard case, since the environment variables may not
+      # be reliable any more.  also, we need to know if already have
+      # good values.  Need to consider that
+    IFS="," split_to_vars c_ip c_tty c_screen_num \
+        c_display c_display_ip c_display_num \
         "$(_ro_controlling_display)"
     if [[ "$c_ip" == "" ]] || [[ "$c_ip" = "127.0.0.1" ]]; then
       if [[ $c_display_num -eq 0 ]] || [[ -z "$c_display_num" ]] ; then
-        export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-        export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+        server=${EMACS_SERVER_LOCAL_NAME}
       else
         echo "Potentially confused by tunneled X - $c_display"
-        export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-        export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+        server=${EMACS_SERVER_LOCAL_NAME}
       fi
     elif server=$(_ro_server_name_for_ip $c_ip) ; then 
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${server}
-      export EMACS_SERVER_NAME=$server
+      : $server
     elif _ro_node_self_p $c_ip ; then 
       echo Connection to own IP
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      server=${EMACS_SERVER_LOCAL_NAME}
     else
       echo No known server for ">$c_ip<"
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      server=${EMACS_SERVER_LOCAL_NAME}
     fi
   elif [[ -n "$SSH_CONNECTION" ]] ; then 
-      # trace back to server
+    # trace back to server
     if server=($(_ro_server_name_for_ip ${SSH_CONNECTION%% *})); then 
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${server}
-      export EMACS_SERVER_NAME=$server
+      : ${server}
     elif _ro_node_self_p ${SSH_CONNECTION%% *} ; then 
       echo Connection to own IP
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      server=${EMACS_SERVER_LOCAL_NAME}    
     else
       echo No known server for ${SSH_CONNECTION%% *}
-      export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-      export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+      server=${EMACS_SERVER_LOCAL_NAME}    
     fi
   else
-    export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${EMACS_SERVER_LOCAL_NAME}
-    export EMACS_SERVER_NAME=$EMACS_SERVER_LOCAL_NAME
+    server=${EMACS_SERVER_LOCAL_NAME}    
   fi
-  if [[ "$EMACS_SERVER_NAME" == "$EMACS_SERVER_LOCAL_NAME" ]] ; then 
+
+  if [[ -z "${server}" ]] ; then 
+    echo "We shouldn't be here."
+    server=${EMACS_SERVER_LOCAL_NAME}
+  fi
+
+  export EMACS_SERVER_FILE=${EMACS_SERVER_AUTH_DIR}/${server}
+  export EMACS_SERVER_NAME=${server}
+
+  if [[ "$server" == "$EMACS_SERVER_LOCAL_NAME" ]] ; then 
     echo "Using local Emacs server"
   else
-    echo "Using Emacs server: $EMACS_SERVER_NAME"
+    echo "Using Emacs server: $server"
   fi
 }
 export -f ro_use
