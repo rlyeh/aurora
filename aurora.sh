@@ -781,7 +781,6 @@ ro_emacs() {
         # Access to EMACS_SERVER is tunneled through SSH.
         # We need to edit the command line to make this work
     
-    echo Using tunnel: $EMACSCLIENT "${args4tunnel[@]}"
     $EMACSCLIENT "${args4tunnel[@]}"
   else 
     if [[ "$OSNAME" == "Linux" ]] && [[ -z "$DISPLAY" ]] ;  then
@@ -791,7 +790,6 @@ ro_emacs() {
             # Use the X display and make a new frame
       dflag="-c"
     fi
-    echo "$EMACSCLIENT" $dflag "$@"
     "$EMACSCLIENT" $dflag "$@"
   fi
 }
