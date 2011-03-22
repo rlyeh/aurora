@@ -252,8 +252,8 @@ _ro_send_server_data() {
 
     # interactive shells that see the STY variable register themselves
     for shell_pid in $(cat ${RO_TMPDIR}/${target_sty}-bashpids) ; do
-        # Tell them to read the files
-        kill -s ${RO_SIG} $shell_pid 2>/dev/null
+        # Tell them to read the files.  Never send signal to self
+        [[ $shell_pid -ne $$ ]] && kill -s ${RO_SIG} $shell_pid 2>/dev/null
     done
     echo $target_sty
 }
@@ -269,6 +269,23 @@ ro_screen() {
 }
 export -f ro_screen
   
+
+ro_screen_session() {
+  # Intended to be called using bactick, so no STY available.  Won't
+  # always work from the command line.
+  local \
+      ppid=$PPID \
+      session \
+      p1 p2
+  split_to_vars session "$(screen -ls $PPID | fgrep $ppid)"
+  p1=${session%%\.*}
+  p2=${session#*\.} ; p2=${p2%%\.*}
+    
+  echo "${p1}.${p2}.*"
+}
+export -f ro_screen_session
+
+
 ro_ssh() {
   local host=$1
   shift
